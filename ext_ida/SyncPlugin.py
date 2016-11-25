@@ -113,6 +113,8 @@ DBG_DIALECTS = {
                  'hbp1': 'xxx '},
     'x64_dbg': {'prefix': '', 'si': 'sti', 'so': 'sto', 'go': 'go', 'bp': 'bp ', 'hbp': 'bph ', 'bp1': 'xxx ',
                 'hbp1': 'xxx '},
+    'lldb': {'prefix': '', 'si': 'si', 'so': 'ni', 'go': 'continue', 'bp': 'breakpoint set -a ', 'hbp': 'breakpoint set -H -a ', 'bp1': 'xxx ',
+            'hbp1': 'xxx '},
 }
 
 # TODO: The icons need to be released on termination.
