@@ -31,6 +31,7 @@ THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
 OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 """
 import socket
+import errno
 import time
 import sys
 import threading
@@ -77,6 +78,25 @@ class Tunnel():
 
     def is_up(self):
         return (self.sock != None and self.sync == True)
+
+    def poll(self):
+        if not self.is_up():
+            return None
+
+        self.sock.setblocking(False)
+
+        try:
+            msg = self.sock.recv(4096).decode()
+        except socket.error as e:
+            err = e.args[0]
+            if (err == errno.EAGAIN or err == errno.EWOULDBLOCK):
+                return '\n'
+            else:
+                self.close()
+                return None
+
+        self.sock.setblocking(True)
+        return msg
 
     def send(self, msg):
         if not self.sock:
@@ -127,6 +147,55 @@ class EventHandlerThread(threading.Thread):
         print "[sync] event handler stopped"
 
 
+# periodically poll socket in a dedicated thread
+class Poller(threading.Thread):
+
+    def __init__(self, sync):
+        threading.Thread.__init__(self)
+        self.evt_enabled = threading.Event()
+        self.evt_enabled.clear()
+        self.evt_stop = threading.Event()
+        self.evt_stop.clear()
+        self.sync = sync
+
+    def run(self):
+        while True:
+            if self.evt_stop.is_set():
+                break
+
+            self.evt_enabled.wait()
+
+            if not self.sync._tunnel:
+                break
+
+            if self.sync._tunnel.is_up():
+                self.poll()
+
+            time.sleep(0.2)
+
+    def poll(self):
+        msg = self.sync._tunnel.poll()
+        if msg:
+            for cmd in msg.split('\n'):
+                if cmd:
+                    ci = self.sync._dbg.GetCommandInterpreter()
+                    res = lldb.SBCommandReturnObject()
+                    ci.HandleCommand(cmd.encode('utf-8'), res)
+                    # print '[sync] poll got command: %s' % batch
+                
+        else:
+            print '[sync] poll no message, stopping'
+            self.stop()
+
+    def enable(self):
+        self.evt_enabled.set()
+
+    def disable(self):
+        self.evt_enabled.clear()
+
+    def stop(self):
+        self.evt_stop.set()
+
 class Sync(object):
 
     def __init__(self):
@@ -134,10 +203,12 @@ class Sync(object):
         self._pcache = {}
         self._dbg = lldb.debugger
         self._platform = self._dbg.GetSelectedPlatform()
+        self._poller = None
 
     def reset(self):
         if self._tunnel:
             self._tunnel.close()
+            self.release_poll_timer()
         self._tunnel = None
         self._pcache = {}
 
@@ -190,6 +261,16 @@ class Sync(object):
 
         self.cmd(CMD_SYNC, "loc", base=base, offset=offset)
 
+    def create_poll_timer(self):
+        if not self._poller:
+            self._poller = Poller(self)
+            self._poller.start()
+
+    def release_poll_timer(self):
+        if self._poller:
+            self._poller.stop()
+            self._poller = None
+
     def _handleStop(self, process):
         if not self._tunnel:
             return
@@ -219,8 +300,10 @@ class Sync(object):
             print "[sync] sync failed"
             self.reset()
             return False
-        self.cmd(CMD_NOTICE, "new_dbg", msg="dbg connect - %s" % self.identity)
+        self.cmd(CMD_NOTICE, "new_dbg", msg="dbg connect - %s" % self.identity, dialect="lldb")
+        self.create_poll_timer()
         print "[sync] sync is now enabled with host %s" % host
+        self._poller.enable()
         return True
 
     def initialize(self, host):
